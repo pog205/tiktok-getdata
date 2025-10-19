@@ -18,16 +18,28 @@ class TikTokUserScraper {
       this.page = globalPage;
       console.log('♻️ Reusing global browser instance');
     } else {
-      // Tạo browser mới
-      this.browser = await puppeteer.launch({
-        headless: 'true', // Sử dụng headless mới cho API
+      // Tạo browser mới với config cho production
+      const launchOptions = {
+        headless: 'new', // Sử dụng headless mới
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu',
           '--disable-blink-features=AutomationControlled',
           '--window-size=1920,1080'
         ]
-      });
+      };
+
+      // Thêm executablePath cho production (Render)
+      if (process.env.NODE_ENV === 'production' || process.env.RENDER) {
+        launchOptions.executablePath = '/usr/bin/chromium-browser';
+      }
+
+      this.browser = await puppeteer.launch(launchOptions);
       
       this.page = await this.browser.newPage();
       this.page.setDefaultNavigationTimeout(15000);

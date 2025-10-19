@@ -4,10 +4,11 @@
   "description": "TikTok user search scraper",
   "main": "puppeteer-scraper.js",
   "scripts": {
-    "start": "node api-server.js",
-    "scraper": "node scraper-optimized.js",
+    "start": "node simple-api-server.js",
+    "scraper": "node tiktok-user-scraper.js",
     "test": "node test-api.js",
-    "dev": "nodemon api-server.js"
+    "dev": "nodemon simple-api-server.js",
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "keywords": [
     "tiktok",
