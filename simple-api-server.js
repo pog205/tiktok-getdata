@@ -96,8 +96,8 @@ app.get('/health', (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 TikTok Scraper API: http://localhost:${PORT}`);
-  console.log(`📖 GET /scrape?query=username&maxResults=5 - Scrape users (GET)`);
-  console.log(`📖 POST /scrape - Scrape users (POST)`);
+  console.log(`📖 GET /api/scrape?query=username&maxResults=5 - Scrape users (GET)`);
+  console.log(`📖 POST /api/scrape - Scrape users (POST)`);
   console.log(`💚 GET /health - Health check`);
 });
 
