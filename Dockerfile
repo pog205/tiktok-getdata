@@ -1,7 +1,7 @@
 # Use Node.js 18 Alpine image
 FROM node:18-alpine
 
-# Install Chromium and dependencies
+# Install Chromium and dependencies for @sparticuz/chromium
 RUN apk add --no-cache \
     chromium \
     nss \
@@ -9,11 +9,14 @@ RUN apk add --no-cache \
     freetype-dev \
     harfbuzz \
     ca-certificates \
-    ttf-freefont
+    ttf-freefont \
+    && rm -rf /var/cache/apk/*
 
-# Set Puppeteer to use installed Chromium
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# Set environment variables for Puppeteer + Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+    NODE_ENV=production \
+    PORT=3000
 
 # Create app directory
 WORKDIR /app
@@ -22,13 +25,21 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm ci --only=production
 
 # Copy source code
 COPY . .
 
+# Create non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001
+
+# Change ownership of the app directory
+RUN chown -R nextjs:nodejs /app
+USER nextjs
+
 # Expose port
-EXPOSE 3002
+EXPOSE 3000
 
 # Start the application
 CMD ["npm", "start"]

@@ -2,13 +2,12 @@
   "name": "tiktok-scraper",
   "version": "1.0.0",
   "description": "TikTok user search scraper",
-  "main": "puppeteer-scraper.js",
+  "main": "tiktok-api-server.js",
   "scripts": {
-    "start": "node simple-api-server.js",
+    "start": "node tiktok-api-server.js",
     "scraper": "node tiktok-user-scraper.js",
-    "test": "node test-api.js",
-    "dev": "nodemon simple-api-server.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "test": "node test-tiktok-api.js",
+    "dev": "nodemon tiktok-api-server.js"
   },
   "keywords": [
     "tiktok",
@@ -31,11 +30,13 @@
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
+    "@sparticuz/chromium": "^119.0.2",
     "axios": "^1.12.2",
+    "cheerio": "^1.1.2",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "fs": "^0.0.1-security",
-    "puppeteer": "^24.25.0",
+    "puppeteer-core": "^21.11.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"
   }

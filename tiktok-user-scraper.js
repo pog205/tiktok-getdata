@@ -20,7 +20,7 @@ class TikTokUserScraper {
     } else {
       // Tạo browser mới với config cho production
       const launchOptions = {
-        headless: 'new', // Sử dụng headless mới
+        headless: 'true', // Sử dụng headless mới
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -116,32 +116,41 @@ class TikTokUserScraper {
         const imageElements = document.querySelectorAll('.css-g3le1f-5e6d46e3--ImgAvatar.e1iqrkv71');
         console.log(`Found ${imageElements.length} image elements`);
         
+        // Get names using provided CSS selector
+        const nameElements = document.querySelectorAll('.css-1cjzxd7-5e6d46e3--PUserSubTitle.e11zs9t57');
+        console.log(`Found ${nameElements.length} name elements`);
+        
         // Try alternative selectors if primary ones don't work
         const usernameElementsAlt = document.querySelectorAll('[data-e2e="user-title"], .user-title, h3, h4');
         const imageElementsAlt = document.querySelectorAll('[data-e2e="user-avatar"], .user-avatar img, img');
+        const nameElementsAlt = document.querySelectorAll('[data-e2e="user-subtitle"], .user-subtitle, .user-name, p');
         
-        console.log(`Alternative: ${usernameElementsAlt.length} usernames, ${imageElementsAlt.length} images`);
+        console.log(`Alternative: ${usernameElementsAlt.length} usernames, ${imageElementsAlt.length} images, ${nameElementsAlt.length} names`);
         
         // Use primary selectors if available, otherwise use alternatives
         const finalUsernames = usernameElements.length > 0 ? usernameElements : usernameElementsAlt;
         const finalImages = imageElements.length > 0 ? imageElements : imageElementsAlt;
+        const finalNames = nameElements.length > 0 ? nameElements : nameElementsAlt;
         
-        const limit = Math.min(max, finalUsernames.length, finalImages.length);
+        const limit = Math.min(max, finalUsernames.length, finalImages.length, finalNames.length);
         
         for (let i = 0; i < limit; i++) {
           const usernameElement = finalUsernames[i];
           const imageElement = finalImages[i];
+          const nameElement = finalNames[i];
           
           if (usernameElement && imageElement) {
             const username = usernameElement.textContent?.trim();
             const img = imageElement.src || imageElement.getAttribute('src');
+            const name = nameElement ? nameElement.textContent?.trim() : '';
             
             if (username && img) {
               results.push({
                 username: username,
-                img: img
+                img: img,
+                name: name || username // Fallback to username if name is empty
               });
-              console.log(`✅ Found user ${i + 1}: ${username}`);
+              console.log(`✅ Found user ${i + 1}: ${username} (${name})`);
             }
           }
         }
@@ -164,6 +173,7 @@ class TikTokUserScraper {
       
       users.forEach((user, index) => {
         console.log(`\n${index + 1}. Username: ${user.username}`);
+        console.log(`   Name: ${user.name}`);
         console.log(`   Avatar: ${user.img}`);
       });
       
