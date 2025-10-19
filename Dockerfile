@@ -1,7 +1,7 @@
 # Use Node.js 18 Alpine image
 FROM node:18-alpine
 
-# Install Chromium and dependencies for @sparticuz/chromium
+# Install Chromium and dependencies
 RUN apk add --no-cache \
     chromium \
     nss \
@@ -10,6 +10,7 @@ RUN apk add --no-cache \
     harfbuzz \
     ca-certificates \
     ttf-freefont \
+    && ln -sf /usr/bin/chromium-browser /usr/bin/chromium \
     && rm -rf /var/cache/apk/*
 
 # Set environment variables for Puppeteer + Chromium
