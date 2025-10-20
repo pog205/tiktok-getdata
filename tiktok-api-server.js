@@ -81,6 +81,25 @@ class TikTokUserScraper {
     this.browser = null;
   }
 
+  // Helper method to wait for any of multiple selectors
+  async waitForAnySelector(page, selectors, timeout = 15000) {
+    const promises = selectors.map(selector => 
+      page.waitForSelector(selector, { timeout: timeout / selectors.length }).catch(() => null)
+    );
+    
+    const results = await Promise.allSettled(promises);
+    const success = results.some(result => result.status === 'fulfilled' && result.value !== null);
+    
+    return success;
+  }
+
+  // Helper method to check if elements exist
+  async checkElementsExist(page, selectors) {
+    return await page.evaluate((selectors) => {
+      return selectors.some(selector => document.querySelector(selector) !== null);
+    }, selectors);
+  }
+
   async ensureBrowser() {
     if (globalBrowser) {
       this.browser = globalBrowser;
@@ -156,13 +175,36 @@ class TikTokUserScraper {
 
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
 
-      // Wait for content to load
-      try {
-        await page.waitForSelector('[data-e2e="user-title"], .user-title, h1, h2', { timeout: 10000 });
+      // Wait for profile content — use multiple selectors
+      const profileSelectors = [
+        '[data-e2e="user-title"]',                           // User title
+        '.user-title',                                       // Generic user title
+        'h1', 'h2',                                         // Headers
+        'img[src*="tiktokcdn.com"]',                        // TikTok images
+        '[data-e2e="user-avatar"] img',                     // User avatar
+        '.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55'         // TikTok username class
+      ];
+
+      const hasContent = await this.waitForAnySelector(page, profileSelectors, 20000);
+      
+      if (hasContent) {
         log.success('Profile loaded successfully');
-      } catch (e) {
+      } else {
         log.error('Profile may be private or not found');
       }
+
+      // Double-check if we have profile content before extracting data
+      const hasProfileContent = await this.checkElementsExist(page, [
+        '[data-e2e="user-title"]', '.user-title', 'h1', 'h2',
+        'img[src*="tiktokcdn.com"]', '[data-e2e="user-avatar"] img'
+      ]);
+
+      if (!hasProfileContent) {
+        log.error('No profile content found - profile may be private or not exist');
+        return null;
+      }
+
+      log.scrape(`Found profile content, proceeding with extraction...`);
 
       // Extract user profile information
       log.scrape('Extracting user profile data...');
@@ -342,13 +384,32 @@ class TikTokUserScraper {
 
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      // Wait for probable content — use specific TikTok CSS classes
-      try {
-        await page.waitForSelector('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55, [data-e2e="user-title"], .user-title', { timeout: 15000 });
+      // Wait for probable content — use multiple selectors
+      const searchSelectors = [
+        'a[href*="/@"]',                                    // User profile links
+        '.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55',        // TikTok username class
+        '[data-e2e="user-title"]',                          // User title
+        '.user-title',                                      // Generic user title
+        'img[src*="tiktokcdn.com"]'                        // TikTok images
+      ];
+
+      const hasContent = await this.waitForAnySelector(page, searchSelectors, 15000);
+      
+      if (hasContent) {
         log.success('Search results loaded successfully');
-      } catch (e) {
+      } else {
         log.error('Content may load slowly or use different selectors - continuing anyway');
       }
+
+      // Double-check if we have any user links before extracting data
+      const hasUserLinks = await this.checkElementsExist(page, ['a[href*="/@"]']);
+
+      if (!hasUserLinks) {
+        log.error('No user links found on page - may need different selectors');
+        return [];
+      }
+
+      log.scrape(`Found user links on page, proceeding with extraction...`);
 
       // Evaluate page to extract users with improved logic
       log.scrape('Extracting search results data...');
