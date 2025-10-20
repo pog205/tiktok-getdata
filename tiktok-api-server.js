@@ -344,7 +344,7 @@ class TikTokUserScraper {
 
       // Wait for probable content — use specific TikTok CSS classes
       try {
-        await page.waitForSelector('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55, [data-e2e="user-title"], .user-title', { timeout: 6000 });
+        await page.waitForSelector('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55, [data-e2e="user-title"], .user-title', { timeout: 15000 });
         log.success('Search results loaded successfully');
       } catch (e) {
         log.error('Content may load slowly or use different selectors - continuing anyway');
