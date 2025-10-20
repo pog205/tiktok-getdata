@@ -1,393 +1,545 @@
+// index.js
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
-const fs = require('fs');
-const path = require('path');
+// Force use puppeteer for Windows compatibility
+let puppeteer, chromium;
+try {
+  puppeteer = require('puppeteer');
+  chromium = null;
+  console.log('✅ Using puppeteer (Windows compatible)');
+} catch (err) {
+  console.log('⚠️ puppeteer not available, trying puppeteer-core');
+  try {
+    puppeteer = require('puppeteer-core');
+    chromium = require('@sparticuz/chromium');
+    console.log('✅ Using puppeteer-core with chromium');
+  } catch (err2) {
+    console.error('❌ Neither puppeteer nor puppeteer-core available');
+    throw err2;
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Global browser pool để tái sử dụng
+// Global browser instance (reuse to save startup time)
 let globalBrowser = null;
-let globalPage = null;
+
+// Semaphore to limit concurrent pages (max N pages simultaneously)
+class Semaphore {
+  constructor(maxConcurrent = 5) {
+    this.maxConcurrent = maxConcurrent;
+    this.currentConcurrent = 0;
+    this.queue = [];
+  }
+
+  async acquire() {
+    return new Promise((resolve) => {
+      if (this.currentConcurrent < this.maxConcurrent) {
+        this.currentConcurrent++;
+        resolve();
+      } else {
+        this.queue.push(resolve);
+      }
+    });
+  }
+
+  release() {
+    this.currentConcurrent--;
+    if (this.queue.length > 0) {
+      const next = this.queue.shift();
+      this.currentConcurrent++;
+      next();
+    }
+  }
+
+  getStats() {
+    return {
+      maxConcurrent: this.maxConcurrent,
+      currentConcurrent: this.currentConcurrent,
+      queueLength: this.queue.length
+    };
+  }
+}
+
+// Global semaphore instance
+const pageSemaphore = new Semaphore(parseInt(process.env.MAX_CONCURRENT_PAGES) || 5);
 
 class TikTokUserScraper {
   constructor() {
     this.browser = null;
-    this.page = null;
-    this.useGlobalPool = true; // Sử dụng global pool
   }
 
-  async init() {
-    if (this.useGlobalPool && globalBrowser) {
-      // Tái sử dụng global browser
+  async ensureBrowser() {
+    if (globalBrowser) {
       this.browser = globalBrowser;
-      this.page = globalPage;
-      console.log('♻️ Reusing global browser instance');
+      return;
+    }
+
+    let launchOptions;
+
+    if (chromium) {
+      // Production mode: use sparticuz chromium (works well on Render)
+      launchOptions = {
+      headless: chromium.headless,
+      args: chromium.args.concat([
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+      ]),
+      ignoreHTTPSErrors: true,
+    };
+
+    try {
+      // executablePath may throw if not available — chromium handles it in many envs
+      launchOptions.executablePath = await chromium.executablePath();
+    } catch (err) {
+      // Fallback: leave executablePath undefined and let puppeteer-core try default
+      console.warn('⚠️ chromium.executablePath() failed, falling back to default executablePath:', err.message);
+      }
     } else {
-      // Tạo browser mới với config cho production (Render)
-      const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
-      
-      const launchOptions = {
-        headless: chromium.headless,
+      // Development mode: use regular puppeteer
+      launchOptions = {
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         args: [
-          ...chromium.args,
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
           '--disable-gpu',
-          '--disable-blink-features=AutomationControlled',
           '--disable-web-security',
-          '--disable-features=VizDisplayCompositor',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-          '--disable-field-trial-config',
-          '--disable-back-forward-cache',
-          '--disable-ipc-flooding-protection',
-          '--no-default-browser-check',
-          '--disable-default-apps',
-          '--disable-popup-blocking',
-          '--disable-prompt-on-repost',
-          '--disable-hang-monitor',
-          '--disable-sync',
-          '--disable-translate',
-          '--disable-logging',
-          '--disable-extensions',
-          '--disable-plugins',
-          '--mute-audio',
-          '--window-size=1920,1080'
-        ]
+          '--disable-features=VizDisplayCompositor'
+        ],
+        ignoreHTTPSErrors: true,
       };
+    }
 
-      // Thêm executablePath cho production (Render)
-      if (isProduction) {
-        try {
-          launchOptions.executablePath = await chromium.executablePath();
-          console.log(`✅ Using Chromium executable: ${launchOptions.executablePath}`);
-        } catch (error) {
-          console.log('⚠️ Failed to get Chromium executable, using system Chrome');
-          // Fallback to system Chrome on Render
-          launchOptions.executablePath = '/usr/bin/chromium-browser';
+    console.log('🚀 Launching browser...');
+    this.browser = await puppeteer.launch(launchOptions);
+    globalBrowser = this.browser;
+    console.log('✅ Browser launched and saved to globalBrowser');
+  }
+
+  // scrapeUserProfile: scrape specific user profile by username
+  async scrapeUserProfile(username) {
+    if (!username) throw new Error('Username parameter is required');
+
+    // Acquire semaphore before creating page
+    await pageSemaphore.acquire();
+    console.log(`🔒 Semaphore acquired. Stats:`, pageSemaphore.getStats());
+
+    await this.ensureBrowser();
+    const page = await this.browser.newPage();
+    try {
+      // Set viewport & UA
+      await page.setViewport({ width: 1200, height: 800 });
+      await page.setUserAgent(
+        'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.7390.78 Mobile Safari/537.36'
+      );
+
+      const url = `https://www.tiktok.com/@${username}`;
+      console.log(`🎯 Navigating to ${url}`);
+
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
+      // Wait for content to load
+      try {
+        await page.waitForSelector('[data-e2e="user-title"], .user-title, h1, h2', { timeout: 10000 });
+        console.log('✅ User profile loaded successfully');
+      } catch (e) {
+        console.log('⚠️ Profile may be private or not found');
+      }
+
+      // Extract user profile information
+      const userInfo = await page.evaluate(() => {
+        const result = {
+          username: '',
+          displayName: '',
+          bio: '',
+          avatar: '',
+          followers: '',
+          following: '',
+          likes: '',
+          verified: false,
+          videos: []
+        };
+
+        // Get username from URL or title
+        const url = window.location.href;
+        const usernameMatch = url.match(/\/@([^\/\?]+)/);
+        if (usernameMatch) {
+          result.username = usernameMatch[1];
         }
-      } else {
-        // For local development, try to find Chrome
-        const possiblePaths = [
-          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-          '/usr/bin/chromium-browser',
-          '/usr/bin/chromium'
+
+        // Get display name - using specific TikTok CSS classes
+        const nameSelectors = [
+          '.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55', // TikTok username class
+          '[data-e2e="user-title"]',
+          '.user-title',
+          'h1',
+          'h2',
+          '[class*="username"]',
+          '[class*="displayName"]'
         ];
         
-        for (const path of possiblePaths) {
-          try {
-            const fs = require('fs');
-            if (fs.existsSync(path)) {
-              launchOptions.executablePath = path;
-              console.log(`✅ Found Chrome at: ${path}`);
-              break;
-            }
-          } catch (e) {
-            // Continue to next path
+        for (const selector of nameSelectors) {
+          const el = document.querySelector(selector);
+          if (el && el.textContent.trim()) {
+            result.displayName = el.textContent.trim();
+            break;
           }
         }
-      }
 
-      console.log('🚀 Launching browser with options:', JSON.stringify(launchOptions, null, 2));
-      this.browser = await puppeteer.launch(launchOptions);
-      console.log('✅ Browser launched successfully');
-      
-      this.page = await this.browser.newPage();
-      this.page.setDefaultNavigationTimeout(30000);
-      console.log('✅ Page created successfully');
-      
-      // Set User-Agent để tránh bị detect
-      await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-      console.log('✅ User-Agent set successfully');
-      
-      // Lưu vào global pool
-      if (this.useGlobalPool) {
-        globalBrowser = this.browser;
-        globalPage = this.page;
-        console.log('🚀 Created new global browser instance');
+        // Get bio/description - using specific TikTok CSS classes
+        const bioSelectors = [
+          '[data-e2e="search-user-nickname"]', // TikTok user nickname class
+          '.css-1cjzxd7-5e6d46e3--PUserSubTitle.e11zs9t57', // TikTok user subtitle class
+          '[data-e2e="user-bio"]',
+          '.user-bio',
+          '[class*="bio"]',
+          '[class*="description"]',
+          'p'
+        ];
+        
+        for (const selector of bioSelectors) {
+          const el = document.querySelector(selector);
+          if (el && el.textContent.trim() && el.textContent.trim() !== result.displayName) {
+            result.bio = el.textContent.trim();
+            break;
+          }
+        }
+
+        // Get avatar - using specific TikTok CSS classes
+        const avatarSelectors = [
+          '.css-g3le1f-5e6d46e3--ImgAvatar.e1iqrkv71 img', // TikTok avatar class
+          '[data-e2e="user-avatar"] img',
+          '.user-avatar img',
+          'img'
+        ];
+        
+        for (const selector of avatarSelectors) {
+          const avatarEl = document.querySelector(selector);
+          if (avatarEl) {
+            result.avatar = avatarEl.src || avatarEl.getAttribute('src') || '';
+            if (result.avatar) break;
+          }
+        }
+
+        // Get follower count
+        const followerSelectors = [
+          '[data-e2e="followers-count"]',
+          '.followers-count',
+          '[class*="follower"]',
+          'strong'
+        ];
+        
+        for (const selector of followerSelectors) {
+          const el = document.querySelector(selector);
+          if (el && el.textContent.includes('Followers')) {
+            result.followers = el.textContent.trim();
+            break;
+          }
+        }
+
+        // Get following count
+        const followingSelectors = [
+          '[data-e2e="following-count"]',
+          '.following-count',
+          '[class*="following"]'
+        ];
+        
+        for (const selector of followingSelectors) {
+          const el = document.querySelector(selector);
+          if (el && el.textContent.includes('Following')) {
+            result.following = el.textContent.trim();
+            break;
+          }
+        }
+
+        // Get likes count
+        const likesSelectors = [
+          '[data-e2e="likes-count"]',
+          '.likes-count',
+          '[class*="likes"]'
+        ];
+        
+        for (const selector of likesSelectors) {
+          const el = document.querySelector(selector);
+          if (el && el.textContent.includes('Likes')) {
+            result.likes = el.textContent.trim();
+            break;
+          }
+        }
+
+        // Check if verified
+        const verifiedEl = document.querySelector('[data-e2e="verified-icon"], .verified-icon, [class*="verified"]');
+        result.verified = !!verifiedEl;
+
+        // Get recent videos (basic info)
+        const videoElements = document.querySelectorAll('[data-e2e="video-item"], .video-item, video');
+        result.videos = Array.from(videoElements).slice(0, 5).map((video, index) => ({
+          index: index + 1,
+          src: video.src || video.querySelector('source')?.src || '',
+          thumbnail: video.poster || video.querySelector('img')?.src || ''
+        }));
+
+        return result;
+      });
+
+      return userInfo;
+    } catch (err) {
+      console.error('❌ scrapeUserProfile error:', err.message);
+      return null;
+    } finally {
+      try {
+        await page.close();
+      } catch (e) {
+        // ignore
+      } finally {
+        // Always release semaphore
+        pageSemaphore.release();
+        console.log(`🔓 Semaphore released. Stats:`, pageSemaphore.getStats());
       }
     }
   }
 
+  // scrapeUsers: create a fresh page per request, close page after done
   async scrapeUsers(query, maxResults = 10) {
-    const url = `https://www.tiktok.com/search/user?q=${encodeURIComponent(query)}`;
-    
-    console.log(`🎯 Bắt đầu cào users từ: ${url}`);
-    console.log(`📊 Max results: ${maxResults}`);
-    
-    const totalStartTime = Date.now();
-    
+    if (!query) throw new Error('Query parameter is required');
+
+    // Acquire semaphore before creating page
+    await pageSemaphore.acquire();
+    console.log(`🔒 Semaphore acquired. Stats:`, pageSemaphore.getStats());
+
+    await this.ensureBrowser();
+    const page = await this.browser.newPage();
     try {
-      // Navigate to search page
-      const navigationStart = Date.now();
-      await this.page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000
-      });
-      const navigationTime = Date.now() - navigationStart;
-      console.log(`✅ Page loaded successfully (${navigationTime}ms)`);
-      
-      // Smart waiting - cào ngay khi có dữ liệu
-      console.log('⏳ Waiting for content to load...');
-      const waitStart = Date.now();
-      
-      // Thử chờ elements xuất hiện với timeout ngắn
-      let elementsFound = false;
+      // Set viewport & UA
+      await page.setViewport({ width: 1200, height: 800 });
+      await page.setUserAgent(
+        'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.7390.78 Mobile Safari/537.36'
+      );
+
+      const url = `https://www.tiktok.com/search/user?q=${encodeURIComponent(query)}`;
+      console.log(`🎯 Navigating to ${url}`);
+
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      // Wait for probable content — use specific TikTok CSS classes
       try {
-        await this.page.waitForSelector('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55', { timeout: 3000 });
-        elementsFound = true;
-        console.log('✅ Username elements found quickly!');
-      } catch (error) {
-        console.log('⚠️ Elements not found quickly, waiting more...');
-        
-        // Nếu không tìm thấy nhanh, chờ thêm một chút
-        await new Promise(r => setTimeout(r, 2000));
-        
-        // Thử lại
-        try {
-          await this.page.waitForSelector('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55', { timeout: 3000 });
-          elementsFound = true;
-          console.log('✅ Username elements found after additional wait!');
-        } catch (error2) {
-          console.log('⚠️ Still no elements found, proceeding anyway...');
-        }
+        await page.waitForSelector('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55, [data-e2e="user-title"], .user-title', { timeout: 6000 });
+      } catch (e) {
+        console.log('⚠️ Nội dung có thể tải chậm hoặc selector khác — sẽ cố gắng scrape anyway');
       }
-      
-      const waitTime = Date.now() - waitStart;
-      console.log(`⏳ Content loaded (${waitTime}ms) - Elements found: ${elementsFound}`);
-      
-      // Scrape data using provided selectors
-      const scrapeStart = Date.now();
-      const users = await this.page.evaluate((max) => {
+
+      // Evaluate page to extract users with improved logic
+      const users = await page.evaluate((max) => {
         const results = [];
         
-        // Get usernames using provided CSS selector
-        const usernameElements = document.querySelectorAll('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55');
-        console.log(`Found ${usernameElements.length} username elements`);
+        // Extract usernames from links (most reliable method)
+        const links = Array.from(document.querySelectorAll('a[href*="/@"]'));
         
-        // Get images using provided CSS selector
-        const imageElements = document.querySelectorAll('.css-g3le1f-5e6d46e3--ImgAvatar.e1iqrkv71');
-        console.log(`Found ${imageElements.length} image elements`);
-        
-        // Get names using provided CSS selector
-        const nameElements = document.querySelectorAll('.css-1cjzxd7-5e6d46e3--PUserSubTitle.e11zs9t57');
-        console.log(`Found ${nameElements.length} name elements`);
-        
-        // Try alternative selectors if primary ones don't work
-        const usernameElementsAlt = document.querySelectorAll('[data-e2e="user-title"], .user-title, h3, h4');
-        const imageElementsAlt = document.querySelectorAll('[data-e2e="user-avatar"], .user-avatar img, img');
-        const nameElementsAlt = document.querySelectorAll('[data-e2e="user-subtitle"], .user-subtitle, .user-name, p');
-        
-        console.log(`Alternative: ${usernameElementsAlt.length} usernames, ${imageElementsAlt.length} images, ${nameElementsAlt.length} names`);
-        
-        // Use primary selectors if available, otherwise use alternatives
-        const finalUsernames = usernameElements.length > 0 ? usernameElements : usernameElementsAlt;
-        const finalImages = imageElements.length > 0 ? imageElements : imageElementsAlt;
-        const finalNames = nameElements.length > 0 ? nameElements : nameElementsAlt;
-        
-        const limit = Math.min(max, finalUsernames.length, finalImages.length, finalNames.length);
-        
-        for (let i = 0; i < limit; i++) {
-          const usernameElement = finalUsernames[i];
-          const imageElement = finalImages[i];
-          const nameElement = finalNames[i];
-          
-          if (usernameElement && imageElement) {
-            const username = usernameElement.textContent?.trim();
-            const img = imageElement.src || imageElement.getAttribute('src');
-            const name = nameElement ? nameElement.textContent?.trim() : '';
+        links.forEach(link => {
+          const href = link.getAttribute('href');
+          const usernameMatch = href.match(/\/@([^\/\?]+)/);
+          if (usernameMatch) {
+            const username = usernameMatch[1];
             
-            if (username && img) {
-              results.push({
-                username: username,
-                img: img,
-                name: name || username // Fallback to username if name is empty
-              });
-              console.log(`✅ Found user ${i + 1}: ${username} (${name})`);
+            // Find image in the link or nearby
+            let img = '';
+            const imgEl = link.querySelector('img');
+            if (imgEl) {
+              img = imgEl.src || imgEl.getAttribute('src') || '';
             }
+            
+            // Find name/display name using specific TikTok selectors
+            let name = username;
+            const nameSelectors = [
+              '[data-e2e="search-user-nickname"]',
+              '.css-1cjzxd7-5e6d46e3--PUserSubTitle.e11zs9t57',
+              'span', 'div', 'p'
+            ];
+            
+            for (const selector of nameSelectors) {
+              const nameEl = link.querySelector(selector);
+              if (nameEl) {
+                const text = nameEl.textContent.trim();
+                if (text && text !== username && !text.includes('Break reminders')) {
+                  name = text;
+                  break;
+                }
+              }
+            }
+            
+            results.push({
+              username: username,
+              img: img,
+              name: name
+            });
+          }
+        });
+        
+        // Remove duplicates based on username
+        const uniqueResults = [];
+        const seenUsernames = new Set();
+        
+        for (const user of results) {
+          if (user.username && !seenUsernames.has(user.username)) {
+            seenUsernames.add(user.username);
+            uniqueResults.push(user);
+            if (uniqueResults.length >= max) break;
           }
         }
         
-        return results;
+        return uniqueResults;
       }, maxResults);
-      const scrapeTime = Date.now() - scrapeStart;
-      
-      const totalTime = Date.now() - totalStartTime;
-      
-      console.log(`\n📊 === KẾT QUẢ CÀO DATA ===`);
-      console.log(`🎯 Query: ${query}`);
-      console.log(`📈 Tìm thấy: ${users.length} users`);
-      console.log(`\n⏱️ === THỜI GIAN CÀO ===`);
-      console.log(`🌐 Navigation: ${navigationTime}ms`);
-      console.log(`⏳ Wait: ${waitTime}ms`);
-      console.log(`🔍 Scrape: ${scrapeTime}ms`);
-      console.log(`⚡ Total: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
-      console.log(`📈 Performance: ${users.length > 0 ? (users.length / (totalTime/1000)).toFixed(2) : 0} users/giây`);
-      
-      return users;
-      
-    } catch (error) {
-      const totalTime = Date.now() - totalStartTime;
-      console.error(`❌ Error scraping users (${totalTime}ms):`, error.message);
+
+      return users.slice(0, maxResults);
+    } catch (err) {
+      console.error('❌ scrapeUsers error:', err.message);
       return [];
+    } finally {
+      try {
+        await page.close();
+      } catch (e) {
+        // ignore
+      } finally {
+        // Always release semaphore
+        pageSemaphore.release();
+        console.log(`🔓 Semaphore released. Stats:`, pageSemaphore.getStats());
+      }
     }
   }
 
-  async close() {
-    if (this.browser && !this.useGlobalPool) {
-      await this.browser.close();
-    } else if (this.useGlobalPool) {
-      console.log('♻️ Keeping global browser alive for reuse');
-    }
-  }
-
-  // Static method để đóng global browser khi cần
   static async closeGlobalBrowser() {
     if (globalBrowser) {
-      await globalBrowser.close();
-      globalBrowser = null;
-      globalPage = null;
-      console.log('🔒 Global browser closed');
+      try {
+        await globalBrowser.close();
+      } catch (e) {
+        console.warn('Error closing globalBrowser:', e.message);
+      } finally {
+        globalBrowser = null;
+      }
     }
   }
 }
 
-// Scrape function wrapper
-async function scrapeUsers(query, maxResults) {
+// Wrapper functions
+async function scrapeUsersWrapper(query, maxResults) {
+  const startTime = Date.now();
   const scraper = new TikTokUserScraper();
-  
   try {
-    await scraper.init();
     const users = await scraper.scrapeUsers(query, maxResults);
-    await scraper.close();
+    const endTime = Date.now();
+    const duration = ((endTime - startTime) / 1000).toFixed(2);
     
     return {
       success: true,
-      data: {
-        query,
-        maxResults,
-        users,
-        count: users.length,
-        timestamp: new Date().toISOString(),
-        method: 'Puppeteer + Chromium (Render Optimized)'
-      }
+      message: `Found ${users.length} users in ${duration}s`,
+      duration: `${duration}s`,
+      data: users
     };
-    
-  } catch (error) {
-    console.error('❌ Scraping error:', error.message);
-    await scraper.close();
-    
-    return {
-      success: false,
-      error: error.message,
-      data: {
-        query,
-        maxResults,
-        users: [],
-        count: 0,
-        timestamp: new Date().toISOString(),
-        method: 'Error'
-      }
+  } catch (err) {
+    const endTime = Date.now();
+    const duration = ((endTime - startTime) / 1000).toFixed(2);
+    return { 
+      success: false, 
+      message: `Error: ${err.message}`,
+      duration: `${duration}s`,
+      users: [] 
     };
   }
 }
 
-// GET endpoint
+async function scrapeUserProfileWrapper(username) {
+  const startTime = Date.now();
+  const scraper = new TikTokUserScraper();
+  try {
+    const userInfo = await scraper.scrapeUserProfile(username);
+    const endTime = Date.now();
+    const duration = ((endTime - startTime) / 1000).toFixed(2);
+    
+    if (userInfo) {
+      return {
+        success: true,
+        message: `Found user profile in ${duration}s`,
+        duration: `${duration}s`,
+        user: userInfo
+      };
+    } else {
+      return {
+        success: false,
+        message: `User not found or profile is private (${duration}s)`,
+        duration: `${duration}s`,
+        user: null
+      };
+    }
+  } catch (err) {
+    const endTime = Date.now();
+    const duration = ((endTime - startTime) / 1000).toFixed(2);
+    return { 
+      success: false, 
+      message: `Error: ${err.message} (${duration}s)`,
+      duration: `${duration}s`,
+      user: null 
+    };
+  }
+}
+
+// Routes
 app.get('/api/scrape', async (req, res) => {
-  try {
-    const { query, maxResults = 5 } = req.query;
-    const maxResultsNum = parseInt(maxResults) || 5;
-    
-    if (!query) {
-      return res.status(400).json({
-        success: false,
-        error: 'Query parameter is required',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    const result = await scrapeUsers(query, maxResultsNum);
-    res.json(result);
-    
-  } catch (error) {
-    console.error('❌ API Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
+  const { query, maxResults = 5 } = req.query;
+  if (!query) return res.status(400).json({ success: false, error: 'Query parameter is required' });
+  const result = await scrapeUsersWrapper(query, parseInt(maxResults) || 5);
+  res.json(result);
 });
 
-// POST endpoint
 app.post('/api/scrape', async (req, res) => {
-  try {
-    const { query, maxResults = 5 } = req.body;
-    
-    if (!query) {
-      return res.status(400).json({
-        success: false,
-        error: 'Query parameter is required',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    const result = await scrapeUsers(query, maxResults);
-    res.json(result);
-    
-  } catch (error) {
-    console.error('❌ API Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
+  const { query, maxResults = 5 } = req.body;
+  if (!query) return res.status(400).json({ success: false, error: 'Query parameter is required' });
+  const result = await scrapeUsersWrapper(query, parseInt(maxResults) || 5);
+  res.json(result);
 });
 
-// Health check
+// User Profile Routes
+app.get('/api/user/:username', async (req, res) => {
+  const { username } = req.params;
+  if (!username) return res.status(400).json({ success: false, error: 'Username parameter is required' });
+  const result = await scrapeUserProfileWrapper(username);
+  res.json(result);
+});
+
+app.post('/api/user', async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ success: false, error: 'Username parameter is required' });
+  const result = await scrapeUserProfileWrapper(username);
+  res.json(result);
+});
+
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'TikTok Scraper API (Puppeteer + Chromium)',
-    mode: 'Puppeteer + Chromium - Render Optimized',
+  res.json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
     browserStatus: globalBrowser ? 'Active' : 'Not Initialized',
-    timestamp: new Date().toISOString()
+    semaphoreStats: pageSemaphore.getStats()
   });
 });
 
-// Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('\n🔄 Gracefully shutting down...');
+  console.log('🔄 Graceful shutdown');
   await TikTokUserScraper.closeGlobalBrowser();
   process.exit(0);
 });
-
 process.on('SIGTERM', async () => {
-  console.log('\n🔄 Gracefully shutting down...');
+  console.log('🔄 Graceful shutdown');
   await TikTokUserScraper.closeGlobalBrowser();
   process.exit(0);
 });
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 TikTok Scraper API (Puppeteer + Chromium): http://localhost:${PORT}`);
-  console.log(`📖 GET /api/scrape?query=username&maxResults=5 - Scrape users (GET)`);
-  console.log(`📖 POST /api/scrape - Scrape users (POST)`);
-  console.log(`💚 GET /health - Health check`);
-  console.log(`🔧 Mode: Puppeteer + Chromium (Render Optimized)`);
+  console.log(`🚀 Server listening on ${PORT}`);
 });
-
-module.exports = app;

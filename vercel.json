@@ -1,15 +1,18 @@
 {
   "version": 2,
   "builds": [
-    { "src": "simple-api-server.js", "use": "@vercel/node" }
+    {
+      "src": "tiktok-api-server.js",
+      "use": "@vercel/node"
+    }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "/simple-api-server.js" },
-    { "src": "/health", "dest": "/simple-api-server.js" }
-  ],
-  "functions": {
-    "simple-api-server.js": {
-      "maxDuration": 30
+    {
+      "src": "/(.*)",
+      "dest": "tiktok-api-server.js"
     }
+  ],
+  "env": {
+    "NODE_ENV": "production"
   }
 }

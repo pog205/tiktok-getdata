@@ -1,46 +1,40 @@
-# Use Node.js 18 Alpine image
-FROM node:18-alpine
+# Sử dụng image Node chính thức
+FROM node:18-slim
 
-# Install Chromium and dependencies
-RUN apk add --no-cache \
+# Cài các dependencies cần cho Chromium
+RUN apt-get update && apt-get install -y \
     chromium \
-    nss \
-    freetype \
-    freetype-dev \
-    harfbuzz \
+    libnss3 \
+    libxss1 \
+    libasound2 \
+    fonts-liberation \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    wget \
+    gnupg \
     ca-certificates \
-    ttf-freefont \
-    && ln -sf /usr/bin/chromium-browser /usr/bin/chromium \
-    && rm -rf /var/cache/apk/*
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set environment variables for Puppeteer + Chromium
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
-    NODE_ENV=production \
-    PORT=3000
-
-# Create app directory
+# Tạo thư mục app
 WORKDIR /app
 
-# Copy package files
+# Copy package.json trước để cache node_modules
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Cài dependency
+RUN npm install
 
-# Copy source code
+# Copy toàn bộ source
 COPY . .
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nextjs -u 1001
-
-# Change ownership of the app directory
-RUN chown -R nextjs:nodejs /app
-USER nextjs
+# Puppeteer config: chỉ định Chromium path
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV NODE_ENV=production
+ENV PORT=3000
 
 # Expose port
 EXPOSE 3000
 
-# Start the application
-CMD ["npm", "start"]
+# Start app
+CMD ["node", "tiktok-api-server.js"]
