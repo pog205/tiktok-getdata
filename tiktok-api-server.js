@@ -1,6 +1,14 @@
 // index.js
 const express = require('express');
 const cors = require('cors');
+
+// Simple logging for data scraping
+const log = {
+  scrape: (msg, data = '') => console.log(`[SCRAPE] ${new Date().toLocaleTimeString()} - ${msg}`, data),
+  error: (msg, data = '') => console.error(`[ERROR] ${new Date().toLocaleTimeString()} - ${msg}`, data),
+  success: (msg, data = '') => console.log(`[SUCCESS] ${new Date().toLocaleTimeString()} - ${msg}`, data)
+};
+
 // Force use puppeteer for Windows compatibility
 let puppeteer, chromium;
 try {
@@ -84,15 +92,15 @@ class TikTokUserScraper {
     if (chromium) {
       // Production mode: use sparticuz chromium (works well on Render)
       launchOptions = {
-      headless: chromium.headless,
-      args: chromium.args.concat([
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ]),
-      ignoreHTTPSErrors: true,
-    };
+        headless: chromium.headless,
+        args: chromium.args.concat([
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+        ]),
+        ignoreHTTPSErrors: true,
+      };  
 
     try {
       // executablePath may throw if not available — chromium handles it in many envs
@@ -128,12 +136,14 @@ class TikTokUserScraper {
   async scrapeUserProfile(username) {
     if (!username) throw new Error('Username parameter is required');
 
+    log.scrape(`Starting user profile scrape for: ${username}`);
+    
     // Acquire semaphore before creating page
     await pageSemaphore.acquire();
-    console.log(`🔒 Semaphore acquired. Stats:`, pageSemaphore.getStats());
 
     await this.ensureBrowser();
     const page = await this.browser.newPage();
+    
     try {
       // Set viewport & UA
       await page.setViewport({ width: 1200, height: 800 });
@@ -142,19 +152,20 @@ class TikTokUserScraper {
       );
 
       const url = `https://www.tiktok.com/@${username}`;
-      console.log(`🎯 Navigating to ${url}`);
+      log.scrape(`Navigating to: ${url}`);
 
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
 
       // Wait for content to load
       try {
         await page.waitForSelector('[data-e2e="user-title"], .user-title, h1, h2', { timeout: 10000 });
-        console.log('✅ User profile loaded successfully');
+        log.success('Profile loaded successfully');
       } catch (e) {
-        console.log('⚠️ Profile may be private or not found');
+        log.error('Profile may be private or not found');
       }
 
       // Extract user profile information
+      log.scrape('Extracting user profile data...');
       const userInfo = await page.evaluate(() => {
         const result = {
           username: '',
@@ -289,10 +300,11 @@ class TikTokUserScraper {
 
         return result;
       });
-
+      
+      log.success(`Profile data extracted: ${userInfo.username} - ${userInfo.displayName}`);
       return userInfo;
     } catch (err) {
-      console.error('❌ scrapeUserProfile error:', err.message);
+      log.error('scrapeUserProfile error:', err.message);
       return null;
     } finally {
       try {
@@ -302,7 +314,6 @@ class TikTokUserScraper {
       } finally {
         // Always release semaphore
         pageSemaphore.release();
-        console.log(`🔓 Semaphore released. Stats:`, pageSemaphore.getStats());
       }
     }
   }
@@ -311,12 +322,14 @@ class TikTokUserScraper {
   async scrapeUsers(query, maxResults = 10) {
     if (!query) throw new Error('Query parameter is required');
 
+    log.scrape(`Starting user search for: "${query}", maxResults: ${maxResults}`);
+    
     // Acquire semaphore before creating page
     await pageSemaphore.acquire();
-    console.log(`🔒 Semaphore acquired. Stats:`, pageSemaphore.getStats());
 
     await this.ensureBrowser();
     const page = await this.browser.newPage();
+    
     try {
       // Set viewport & UA
       await page.setViewport({ width: 1200, height: 800 });
@@ -325,18 +338,20 @@ class TikTokUserScraper {
       );
 
       const url = `https://www.tiktok.com/search/user?q=${encodeURIComponent(query)}`;
-      console.log(`🎯 Navigating to ${url}`);
+      log.scrape(`Navigating to: ${url}`);
 
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
       // Wait for probable content — use specific TikTok CSS classes
       try {
         await page.waitForSelector('.css-1iaxnh7-5e6d46e3--PTitle.e11zs9t55, [data-e2e="user-title"], .user-title', { timeout: 6000 });
+        log.success('Search results loaded successfully');
       } catch (e) {
-        console.log('⚠️ Nội dung có thể tải chậm hoặc selector khác — sẽ cố gắng scrape anyway');
+        log.error('Content may load slowly or use different selectors - continuing anyway');
       }
 
       // Evaluate page to extract users with improved logic
+      log.scrape('Extracting search results data...');
       const users = await page.evaluate((max) => {
         const results = [];
         
@@ -356,21 +371,43 @@ class TikTokUserScraper {
               img = imgEl.src || imgEl.getAttribute('src') || '';
             }
             
-            // Find name/display name using specific TikTok selectors
+            // Find name/display name - look in parent container for nickname
             let name = username;
-            const nameSelectors = [
-              '[data-e2e="search-user-nickname"]',
-              '.css-1cjzxd7-5e6d46e3--PUserSubTitle.e11zs9t57',
-              'span', 'div', 'p'
-            ];
             
-            for (const selector of nameSelectors) {
-              const nameEl = link.querySelector(selector);
-              if (nameEl) {
-                const text = nameEl.textContent.trim();
-                if (text && text !== username && !text.includes('Break reminders')) {
-                  name = text;
-                  break;
+            // Look for nickname in the link itself first
+            const nicknameEl = link.querySelector('[data-e2e="search-user-nickname"]');
+            if (nicknameEl) {
+              const text = nicknameEl.textContent.trim();
+              if (text && text !== username) {
+                name = text;
+              }
+            } else {
+              // Look in the parent container
+              const parent = link.closest('div, section, article');
+              if (parent) {
+                const parentNicknameEl = parent.querySelector('[data-e2e="search-user-nickname"]');
+                if (parentNicknameEl) {
+                  const text = parentNicknameEl.textContent.trim();
+                  if (text && text !== username) {
+                    name = text;
+                  }
+                } else {
+                  // Fallback to other selectors in parent
+                  const nameSelectors = [
+                    '.css-1cjzxd7-5e6d46e3--PUserSubTitle.e11zs9t57',
+                    'p', 'span', 'div'
+                  ];
+                  
+                  for (const selector of nameSelectors) {
+                    const nameEl = parent.querySelector(selector);
+                    if (nameEl) {
+                      const text = nameEl.textContent.trim();
+                      if (text && text !== username && !text.includes('Break reminders') && text.length < 50) {
+                        name = text;
+                        break;
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -398,9 +435,10 @@ class TikTokUserScraper {
         return uniqueResults;
       }, maxResults);
 
+      log.success(`Found ${users.length} users: ${users.map(u => u.username).join(', ')}`);
       return users.slice(0, maxResults);
     } catch (err) {
-      console.error('❌ scrapeUsers error:', err.message);
+      log.error('scrapeUsers error:', err.message);
       return [];
     } finally {
       try {
@@ -410,7 +448,6 @@ class TikTokUserScraper {
       } finally {
         // Always release semaphore
         pageSemaphore.release();
-        console.log(`🔓 Semaphore released. Stats:`, pageSemaphore.getStats());
       }
     }
   }
@@ -437,6 +474,8 @@ async function scrapeUsersWrapper(query, maxResults) {
     const endTime = Date.now();
     const duration = ((endTime - startTime) / 1000).toFixed(2);
     
+    log.success(`Scrape completed in ${duration}s - Found ${users.length} users`);
+    
     return {
       success: true,
       message: `Found ${users.length} users in ${duration}s`,
@@ -446,11 +485,14 @@ async function scrapeUsersWrapper(query, maxResults) {
   } catch (err) {
     const endTime = Date.now();
     const duration = ((endTime - startTime) / 1000).toFixed(2);
+    
+    log.error(`Scrape failed after ${duration}s: ${err.message}`);
+    
     return { 
       success: false, 
       message: `Error: ${err.message}`,
       duration: `${duration}s`,
-      users: [] 
+      data: [] 
     };
   }
 }
@@ -464,6 +506,8 @@ async function scrapeUserProfileWrapper(username) {
     const duration = ((endTime - startTime) / 1000).toFixed(2);
     
     if (userInfo) {
+      log.success(`Profile scrape completed in ${duration}s - ${userInfo.username}`);
+      
       return {
         success: true,
         message: `Found user profile in ${duration}s`,
@@ -471,6 +515,8 @@ async function scrapeUserProfileWrapper(username) {
         user: userInfo
       };
     } else {
+      log.error(`Profile not found after ${duration}s`);
+      
       return {
         success: false,
         message: `User not found or profile is private (${duration}s)`,
@@ -481,6 +527,9 @@ async function scrapeUserProfileWrapper(username) {
   } catch (err) {
     const endTime = Date.now();
     const duration = ((endTime - startTime) / 1000).toFixed(2);
+    
+    log.error(`Profile scrape failed after ${duration}s: ${err.message}`);
+    
     return { 
       success: false, 
       message: `Error: ${err.message} (${duration}s)`,
